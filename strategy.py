@@ -37,6 +37,11 @@ class TradingStrategy:
     minimum_candles_required = 25
     partial_scale_fraction = 0.5        # scale-out size at 1R
 
+    # IV (Implied Volatility) filters
+    use_iv_filter = False               # Enable/disable IV filtering
+    iv_percentile_buy_max = 30          # Buy options when IV percentile < 30 (cheap premium)
+    iv_percentile_sell_min = 70         # Sell options when IV percentile > 70 (expensive premium)
+
     def __init__(self):
         # --- API & symbols ---
         self.client = UpstoxClient()
@@ -329,6 +334,88 @@ class TradingStrategy:
         recent_vol = candles[-1]['volume']
         avg_vol = sum(c['volume'] for c in candles[-lookback-1:-1]) / lookback
         return recent_vol >= avg_vol * 1.2  # 20% above average
+
+    def _get_current_iv(self, symbol=None):
+        """
+        Get current Implied Volatility from API.
+        Returns None if IV not available.
+        """
+        sym = symbol or self.symbol
+        try:
+            # Try to get IV from option chain or quote data
+            quote = self.client.get_quote(sym)
+            if quote and 'data' in quote:
+                quote_key = sym.replace('|', ':')
+                quote_data = quote['data'].get(quote_key, {})
+
+                # Check if IV is available in Greeks
+                greeks = quote_data.get('greeks', {})
+                iv = greeks.get('iv') or greeks.get('implied_volatility')
+
+                if iv:
+                    return float(iv)
+
+            # If not available, return None (filter will be disabled)
+            return None
+        except Exception as e:
+            print(f"IV fetch error: {e}")
+            return None
+
+    def _calculate_iv_percentile(self, current_iv, lookback_days=30):
+        """
+        Calculate IV percentile over lookback period.
+        Note: This requires historical IV data which may not be readily available.
+        Returns None if cannot calculate.
+        """
+        if current_iv is None:
+            return None
+
+        try:
+            # TODO: Implement historical IV fetch when API supports it
+            # For now, this is a placeholder that returns None
+            # In production, you would:
+            # 1. Fetch historical IV values for past lookback_days
+            # 2. Calculate percentile rank of current_iv
+
+            # Placeholder logic (always returns None to disable filter)
+            return None
+
+        except Exception as e:
+            print(f"IV percentile calc error: {e}")
+            return None
+
+    def _check_iv_conditions(self, side):
+        """
+        Check if IV conditions are favorable for entry.
+        For option buying (directional): prefer low IV percentile (cheaper premium)
+        For option selling: prefer high IV percentile (expensive premium)
+
+        Returns True if conditions are met or if IV filter is disabled.
+        """
+        if not self.use_iv_filter:
+            return True
+
+        if not self.is_option:
+            return True  # Skip IV check for non-options
+
+        current_iv = self._get_current_iv()
+        if current_iv is None:
+            print("IV data unavailable - proceeding without IV filter")
+            return True
+
+        iv_percentile = self._calculate_iv_percentile(current_iv)
+        if iv_percentile is None:
+            print("IV percentile unavailable - proceeding without IV filter")
+            return True
+
+        # For directional option buying (both BUY and SELL sides)
+        # We want LOW IV percentile (cheap options)
+        if iv_percentile < self.iv_percentile_buy_max:
+            print(f"IV check passed: IV percentile {iv_percentile:.1f}% < {self.iv_percentile_buy_max}%")
+            return True
+        else:
+            print(f"IV too high: IV percentile {iv_percentile:.1f}% >= {self.iv_percentile_buy_max}% - skip trade")
+            return False
 
     def _get_lot_size(self):
         # Try to fetch from API; fall back to 25 for NIFTY (updated lot size)
@@ -648,6 +735,11 @@ class TradingStrategy:
             if not self._check_pullback_setup(ctx['u_5m'], ctx['ema9_under'], ctx['ema21_under'], 'SELL', ctx['atr_under']):
                 print("SELL pullback setup invalidated. Order not placed.")
                 return False
+
+        # IV (Implied Volatility) check
+        if not self._check_iv_conditions(side):
+            print("IV conditions not favorable. Order not placed.")
+            return False
 
         # Liquidity & spread guard
         liq = self._liquidity_guard(side)
