@@ -1,5 +1,6 @@
 from datetime import datetime, time as dt_time
 import math
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from upstox_client import UpstoxClient
@@ -42,9 +43,9 @@ class TradingStrategy:
     iv_percentile_buy_max = 30          # Buy options when IV percentile < 30 (cheap premium)
     iv_percentile_sell_min = 70         # Sell options when IV percentile > 70 (expensive premium)
 
-    def __init__(self):
+    def __init__(self, client: Optional[UpstoxClient] = None):
         # --- API & symbols ---
-        self.client = UpstoxClient()
+        self.client = client or UpstoxClient()
         self.symbol = TRADING_SYMBOL
         self.underlying_symbol = UNDERLYING_SYMBOL
         self.exchange_tz = ZoneInfo("Asia/Kolkata")
@@ -65,11 +66,20 @@ class TradingStrategy:
         self.option_target_pct = OPTION_TARGET_PERCENTAGE or 60.0
 
         # session windows in IST
+        # Market hours: 9:15 AM - 3:30 PM
+        # Avoid first 20 min (9:15-9:35) and last 20 min (3:10-3:30)
+        # Safe trading windows: 9:35-11:30, 1:45-3:10 PM
+        self.market_open = dt_time(9, 15)
+        self.market_close = dt_time(15, 30)
+        self.buffer_minutes_start = 20  # Wait 20 min after market open
+        self.buffer_minutes_end = 20    # Stop 20 min before market close
+
         self.session_windows = [
-            (dt_time(9, 25), dt_time(11, 30)),
-            (dt_time(13, 45), dt_time(15, 15)),
+            (dt_time(9, 35), dt_time(11, 30)),   # Morning session (after 20 min buffer)
+            (dt_time(13, 45), dt_time(15, 10)),  # Afternoon session (20 min before close)
         ]
-        self.flatten_time = dt_time(15, 20)  # EOD flatten
+        self.flatten_time = dt_time(15, 10)  # Flatten 20 min before market close
+        self.hard_exit_time = dt_time(15, 20)  # Force exit if still holding
 
         # --- Dynamic state ---
         self.active_position = None
@@ -949,8 +959,15 @@ class TradingStrategy:
         self.latest_snapshot = ctx
 
         t_ist = ctx['now'].time()
+
+        # Hard exit at 3:20 PM - absolutely no overnight positions
+        if t_ist >= self.hard_exit_time:
+            print("\n[HARD EXIT] Market closing - Force exit to prevent overnight position.")
+            return "Hard exit"
+
+        # Normal flatten at 3:10 PM (20 min before close)
         if t_ist >= self.flatten_time:
-            print("\nEnd-of-day flatten time reached.")
+            print("\nEnd-of-day flatten time reached (20 min before market close).")
             return "End of day"
 
         u_vwap = ctx.get('u_vwap')
